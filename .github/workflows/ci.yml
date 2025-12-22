@@ -107,23 +107,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
       - name: Install cargo-deny
-        run: cargo binstall --no-confirm cargo-deny
+        uses: taiki-e/install-action@cargo-deny
 
-      - name: Scan for vulnerabilities
-        run: cargo deny check advisories
-
-      - name: Check licenses
-        run: cargo deny check licenses
-
-      - name: Check bans
-        run: cargo deny check bans
+      - name: Run cargo-deny
+        run: cargo deny check
 
       - name: Install cargo-semver-checks
-        run: cargo binstall --no-confirm cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
 
       - name: Check SemVer compliance
         run: cargo semver-checks check-release
@@ -167,14 +158,8 @@ jobs:
           shared-key: "test-${{ matrix.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
       - name: Install nextest
-        run: cargo binstall --no-confirm cargo-nextest
-
-      - name: Build
-        run: cargo build --workspace --all-targets --all-features
+        uses: taiki-e/install-action@nextest
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features --no-fail-fast
@@ -195,11 +180,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
       - name: Install llvm-cov and nextest
-        run: cargo binstall --no-confirm cargo-llvm-cov cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2

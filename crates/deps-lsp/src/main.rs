@@ -1,6 +1,6 @@
 use deps_lsp::server::Backend;
 use tower_lsp::{LspService, Server};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 #[tokio::main]
 async fn main() {

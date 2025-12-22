@@ -32,8 +32,8 @@
 //! // Handlers use state.get_document() to access parsed dependencies
 //! ```
 
+pub mod code_actions;
 pub mod completion;
+pub mod diagnostics;
 pub mod hover;
 pub mod inlay_hints;
-pub mod diagnostics;
-pub mod code_actions;

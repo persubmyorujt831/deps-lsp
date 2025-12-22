@@ -1,6 +1,6 @@
 use crate::error::{DepsError, Result};
 use dashmap::DashMap;
-use reqwest::{header, Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -192,10 +192,13 @@ impl HttpCache {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
-        let body = response.bytes().await.map_err(|e| DepsError::RegistryError {
-            package: url.to_string(),
-            source: e,
-        })?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| DepsError::RegistryError {
+                package: url.to_string(),
+                source: e,
+            })?;
 
         let body_arc = Arc::new(body.to_vec());
 
@@ -226,10 +229,15 @@ impl HttpCache {
     pub(crate) async fn fetch_and_store(&self, url: &str) -> Result<Arc<Vec<u8>>> {
         tracing::debug!("fetching fresh: {}", url);
 
-        let response = self.client.get(url).send().await.map_err(|e| DepsError::RegistryError {
-            package: url.to_string(),
-            source: e,
-        })?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| DepsError::RegistryError {
+                package: url.to_string(),
+                source: e,
+            })?;
 
         if !response.status().is_success() {
             return Err(DepsError::CacheError(format!(
@@ -251,10 +259,13 @@ impl HttpCache {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
-        let body = response.bytes().await.map_err(|e| DepsError::RegistryError {
-            package: url.to_string(),
-            source: e,
-        })?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| DepsError::RegistryError {
+                package: url.to_string(),
+                source: e,
+            })?;
 
         let body_arc = Arc::new(body.to_vec());
 

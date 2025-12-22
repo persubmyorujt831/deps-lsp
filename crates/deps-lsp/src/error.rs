@@ -84,15 +84,14 @@ mod tests {
     #[test]
     fn test_invalid_version_req() {
         let error = DepsError::InvalidVersionReq("invalid".into());
-        assert_eq!(
-            error.to_string(),
-            "invalid version requirement: invalid"
-        );
+        assert_eq!(error.to_string(), "invalid version requirement: invalid");
     }
 
     #[test]
     fn test_parse_error() {
-        let toml_err = "invalid toml".parse::<toml_edit::DocumentMut>().unwrap_err();
+        let toml_err = "invalid toml"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_err();
         let error = DepsError::ParseError {
             file_type: "Cargo.toml".into(),
             source: toml_err,

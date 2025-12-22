@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::{
     InitializedParams, MessageType, OneOf, ServerCapabilities, ServerInfo,
     TextDocumentSyncCapability, TextDocumentSyncKind,
 };
-use tower_lsp::{jsonrpc::Result, Client, LanguageServer};
+use tower_lsp::{Client, LanguageServer, jsonrpc::Result};
 
 pub struct Backend {
     client: Client,
@@ -113,14 +113,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_backend_creation() {
-        let (_service, _socket) = tower_lsp::LspService::build(|client| Backend::new(client)).finish();
+        let (_service, _socket) =
+            tower_lsp::LspService::build(|client| Backend::new(client)).finish();
         // Backend should be created successfully
         // This is a minimal smoke test
     }
 
     #[tokio::test]
     async fn test_initialize_without_options() {
-        let (_service, _socket) = tower_lsp::LspService::build(|client| Backend::new(client)).finish();
+        let (_service, _socket) =
+            tower_lsp::LspService::build(|client| Backend::new(client)).finish();
         // Should initialize successfully with default config
         // Integration tests will test actual LSP protocol
     }

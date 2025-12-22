@@ -1,5 +1,5 @@
 use crate::cache::HttpCache;
-use crate::cargo::{types::CargoVersion, ParsedDependency};
+use crate::cargo::{ParsedDependency, types::CargoVersion};
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,7 +100,10 @@ impl ServerState {
     /// Returns a read-only reference to the document state if it exists.
     /// The reference holds a lock on the internal map, so it should be
     /// dropped as soon as possible.
-    pub fn get_document(&self, uri: &Url) -> Option<dashmap::mapref::one::Ref<'_, Url, DocumentState>> {
+    pub fn get_document(
+        &self,
+        uri: &Url,
+    ) -> Option<dashmap::mapref::one::Ref<'_, Url, DocumentState>> {
         self.documents.get(uri)
     }
 

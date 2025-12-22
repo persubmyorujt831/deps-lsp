@@ -262,7 +262,10 @@ mod tests {
 
         let config: DepsConfig = serde_json::from_str(json).unwrap();
         assert!(config.inlay_hints.enabled);
-        assert_eq!(config.diagnostics.outdated_severity, DiagnosticSeverity::HINT);
+        assert_eq!(
+            config.diagnostics.outdated_severity,
+            DiagnosticSeverity::HINT
+        );
         assert_eq!(config.cache.refresh_interval_secs, 300);
     }
 
@@ -278,7 +281,10 @@ mod tests {
         assert!(!config.inlay_hints.enabled);
         // Other fields should use defaults
         assert_eq!(config.inlay_hints.up_to_date_text, "✓");
-        assert_eq!(config.diagnostics.outdated_severity, DiagnosticSeverity::HINT);
+        assert_eq!(
+            config.diagnostics.outdated_severity,
+            DiagnosticSeverity::HINT
+        );
     }
 
     #[test]

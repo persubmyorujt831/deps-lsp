@@ -47,7 +47,25 @@ jobs:
             workflows:
               - '.github/workflows/**'
 
-  # Quick checks first - fail fast
+  # Format check (nightly for Edition 2024)
+  fmt:
+    name: Format
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # Clippy and docs (stable)
   check:
     name: Check
     needs: changes
@@ -60,12 +78,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Install Rust nightly (for Edition 2024 formatting)
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
+          components: clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -73,29 +86,8 @@ jobs:
           shared-key: "check"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Check formatting (nightly for Edition 2024)
-        run: cargo +nightly fmt --all -- --check
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
-
-      - name: Install SARIF tools
-        run: cargo binstall --no-confirm clippy-sarif sarif-fmt
-
-      - name: Clippy SARIF (for GitHub PR integration)
-        run: |
-          cargo clippy --workspace --all-targets --all-features --message-format=json -- -D warnings | \
-          clippy-sarif | tee clippy-results.sarif | sarif-fmt
-        continue-on-error: true
-
-      - name: Upload SARIF results to GitHub
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: clippy-results.sarif
-          wait-for-processing: true
 
       - name: Check documentation
         run: cargo doc --workspace --no-deps --all-features
@@ -140,7 +132,7 @@ jobs:
   # Cross-platform tests with matrix
   test:
     name: Test (${{ matrix.os }})
-    needs: [changes, check]
+    needs: [changes, fmt, check]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -213,7 +205,7 @@ jobs:
   # Code coverage (Linux only for speed)
   coverage:
     name: Code Coverage
-    needs: [changes, check]
+    needs: [changes, fmt, check]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -259,7 +251,7 @@ jobs:
   # MSRV check
   msrv:
     name: Check MSRV
-    needs: [changes, check]
+    needs: [changes, fmt, check]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -288,7 +280,7 @@ jobs:
   # WASM build check for Zed extension
   wasm:
     name: WASM Build (Zed Extension)
-    needs: [changes, check]
+    needs: [changes, fmt, check]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -377,7 +369,7 @@ jobs:
   # All checks passed
   ci-success:
     name: CI Success
-    needs: [changes, check, security, test, coverage, msrv, wasm]
+    needs: [changes, fmt, check, security, test, coverage, msrv, wasm]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -401,6 +393,7 @@ jobs:
           }
 
           failed=0
+          check_job "${{ needs.fmt.result }}" "fmt" || failed=1
           check_job "${{ needs.check.result }}" "check" || failed=1
           check_job "${{ needs.security.result }}" "security" || failed=1
           check_job "${{ needs.test.result }}" "test" || failed=1

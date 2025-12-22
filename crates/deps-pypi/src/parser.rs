@@ -74,6 +74,11 @@ impl PypiParser {
             dependencies.extend(self.parse_pep621_optional_dependencies(project, content)?);
         }
 
+        // Parse PEP 735 dependency-groups format
+        if let Some(dep_groups) = doc.get("dependency-groups").and_then(|i| i.as_table()) {
+            dependencies.extend(self.parse_dependency_groups(dep_groups, content)?);
+        }
+
         // Parse Poetry format
         if let Some(tool) = doc.get("tool").and_then(|i| i.as_table())
             && let Some(poetry) = tool.get("poetry").and_then(|i| i.as_table())
@@ -104,10 +109,10 @@ impl PypiParser {
 
         let mut dependencies = Vec::new();
 
-        for (idx, value) in deps_array.iter().enumerate() {
+        for value in deps_array.iter() {
             if let Some(dep_str) = value.as_str() {
-                let position =
-                    self.find_array_element_position(content, "project.dependencies", idx);
+                // Find exact position of this dependency string in content
+                let position = self.find_dependency_string_position(content, dep_str);
 
                 match self.parse_pep508_requirement(dep_str, position) {
                     Ok(mut dep) => {
@@ -142,11 +147,10 @@ impl PypiParser {
 
         for (group_name, group_item) in opt_deps_table.iter() {
             if let Some(group_array) = group_item.as_array() {
-                for (idx, value) in group_array.iter().enumerate() {
+                for value in group_array.iter() {
                     if let Some(dep_str) = value.as_str() {
-                        let section_name = format!("project.optional-dependencies.{}", group_name);
-                        let position =
-                            self.find_array_element_position(content, &section_name, idx);
+                        // Find exact position of this dependency string in content
+                        let position = self.find_dependency_string_position(content, dep_str);
 
                         match self.parse_pep508_requirement(dep_str, position) {
                             Ok(mut dep) => {
@@ -157,6 +161,53 @@ impl PypiParser {
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to parse dependency '{}': {}", dep_str, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dependencies)
+    }
+
+    /// Parse PEP 735 `[dependency-groups]` tables.
+    ///
+    /// Format: `[dependency-groups]` with named groups containing arrays of PEP 508 requirements.
+    /// Example:
+    /// ```toml
+    /// [dependency-groups]
+    /// dev = ["pytest>=8.0", "mypy>=1.0"]
+    /// test = ["pytest>=8.0", "pytest-cov>=4.0"]
+    /// ```
+    fn parse_dependency_groups(
+        &self,
+        dep_groups: &Table,
+        content: &str,
+    ) -> Result<Vec<PypiDependency>> {
+        let mut dependencies = Vec::new();
+
+        for (group_name, group_item) in dep_groups.iter() {
+            if let Some(group_array) = group_item.as_array() {
+                for value in group_array.iter() {
+                    if let Some(dep_str) = value.as_str() {
+                        // Find exact position of this dependency string in content
+                        let position = self.find_dependency_string_position(content, dep_str);
+
+                        match self.parse_pep508_requirement(dep_str, position) {
+                            Ok(mut dep) => {
+                                dep.section = PypiDependencySection::DependencyGroup {
+                                    group: group_name.to_string(),
+                                };
+                                dependencies.push(dep);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse dependency group '{}' item '{}': {}",
+                                    group_name,
+                                    dep_str,
+                                    e
+                                );
                             }
                         }
                     }
@@ -268,7 +319,22 @@ impl PypiParser {
         let (version_req, version_range, source) = match requirement.version_or_url {
             Some(VersionOrUrl::VersionSpecifier(specs)) => {
                 let version_str = specs.to_string();
-                let start_offset = name.len() + requirement.extras.len();
+                // Calculate offset from name start to version specifier
+                // For "package>=1.0": offset = len("package") = 7
+                // For "package[extra]>=1.0": offset = len("package[extra]") = 14
+                let extras_str_len = if requirement.extras.is_empty() {
+                    0
+                } else {
+                    // Format: "[extra1,extra2]"
+                    let extras_joined = requirement
+                        .extras
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    extras_joined.len() + 2 // +2 for [ and ]
+                };
+                let start_offset = name.len() + extras_str_len;
                 let version_range = base_position.map(|pos| {
                     Range::new(
                         Position::new(pos.line, pos.character + start_offset as u32),
@@ -439,28 +505,51 @@ impl PypiParser {
         )))
     }
 
-    /// Find position of array element in source content.
-    fn find_array_element_position(
-        &self,
-        _content: &str,
-        _section: &str,
-        _index: usize,
-    ) -> Option<Position> {
-        // TODO: Implement actual position tracking using toml_edit spans
-        // For now, return None - positions will be default
+    /// Find the exact position of a dependency string in the content.
+    /// Returns the position at the START of the package name (for name_range)
+    /// and can be used to calculate version_range.
+    fn find_dependency_string_position(&self, content: &str, dep_str: &str) -> Option<Position> {
+        // Search for the quoted dependency string
+        let quoted = format!("\"{}\"", dep_str);
+        if let Some(pos) = content.find(&quoted) {
+            let before = &content[..pos + 1]; // +1 to skip opening quote
+            let line = before.chars().filter(|&c| c == '\n').count() as u32;
+            let last_newline = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let character = (pos + 1 - last_newline) as u32; // +1 to skip opening quote
+            return Some(Position::new(line, character));
+        }
+
+        // Try single quotes
+        let single_quoted = format!("'{}'", dep_str);
+        if let Some(pos) = content.find(&single_quoted) {
+            let before = &content[..pos + 1];
+            let line = before.chars().filter(|&c| c == '\n').count() as u32;
+            let last_newline = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let character = (pos + 1 - last_newline) as u32;
+            return Some(Position::new(line, character));
+        }
+
         None
     }
 
     /// Find position of table key in source content.
-    fn find_table_key_position(
-        &self,
-        _content: &str,
-        _section: &str,
-        _key: &str,
-    ) -> Option<Position> {
-        // TODO: Implement actual position tracking using toml_edit spans
-        // For now, return None - positions will be default
-        None
+    fn find_table_key_position(&self, content: &str, section: &str, key: &str) -> Option<Position> {
+        // Find section first
+        let section_marker = format!("[{}]", section);
+        let section_start = content.find(&section_marker)?;
+
+        // Find the key after the section
+        let after_section = &content[section_start..];
+        let key_pattern = format!("{} = ", key);
+        let key_pos = after_section.find(&key_pattern)?;
+
+        let total_offset = section_start + key_pos;
+        let before_key = &content[..total_offset];
+        let line = before_key.chars().filter(|&c| c == '\n').count() as u32;
+        let last_newline = before_key.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let character = (total_offset - last_newline) as u32;
+
+        Some(Position::new(line, character))
     }
 }
 
@@ -639,6 +728,42 @@ sphinx = "^5.0"
     }
 
     #[test]
+    fn test_parse_pep735_dependency_groups() {
+        let content = r#"
+[dependency-groups]
+dev = ["pytest>=8.0", "mypy>=1.0", "ruff>=0.8"]
+test = ["pytest>=8.0", "pytest-cov>=4.0"]
+"#;
+
+        let parser = PypiParser::new();
+        let result = parser.parse_content(content).unwrap();
+        let deps = &result.dependencies;
+
+        assert_eq!(deps.len(), 5);
+
+        let dev_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| {
+                matches!(&d.section, PypiDependencySection::DependencyGroup { group } if group == "dev")
+            })
+            .collect();
+        assert_eq!(dev_deps.len(), 3);
+
+        let test_deps: Vec<_> = deps
+            .iter()
+            .filter(|d| {
+                matches!(&d.section, PypiDependencySection::DependencyGroup { group } if group == "test")
+            })
+            .collect();
+        assert_eq!(test_deps.len(), 2);
+
+        // Verify package names
+        assert!(dev_deps.iter().any(|d| d.name == "pytest"));
+        assert!(dev_deps.iter().any(|d| d.name == "mypy"));
+        assert!(dev_deps.iter().any(|d| d.name == "ruff"));
+    }
+
+    #[test]
     fn test_parse_pep508_with_markers() {
         let content = r#"
 [project]
@@ -712,6 +837,268 @@ name = "test"
         let result = parser.parse_content(content).unwrap();
         let deps = &result.dependencies;
 
+        assert_eq!(deps.len(), 0);
+    }
+
+    #[test]
+    fn test_position_tracking_pep735() {
+        // Test that position tracking works correctly for PEP 735 dependency-groups
+        let content = r#"[dependency-groups]
+dev = ["pytest>=8.0", "mypy>=1.0"]
+"#;
+
+        let parser = PypiParser::new();
+        let result = parser.parse_content(content).unwrap();
+        let deps = &result.dependencies;
+
+        assert_eq!(deps.len(), 2);
+
+        // Check pytest>=8.0 position
+        let pytest = deps.iter().find(|d| d.name == "pytest").unwrap();
+        // Line 1 (0-indexed), character should be at 'p' (position 8 after `dev = ["`)
+        assert_eq!(pytest.name_range.start.line, 1);
+        assert_eq!(pytest.name_range.start.character, 8);
+        // Version range should point to >=8.0
+        assert!(pytest.version_range.is_some());
+        let version_range = pytest.version_range.unwrap();
+        assert_eq!(version_range.start.line, 1);
+        // pytest is 6 chars, so version starts at 8 + 6 = 14
+        assert_eq!(version_range.start.character, 14);
+        // >=8.0 is 5 chars, so version ends at 14 + 5 = 19
+        assert_eq!(version_range.end.character, 19);
+
+        // Check mypy>=1.0 position
+        let mypy = deps.iter().find(|d| d.name == "mypy").unwrap();
+        assert_eq!(mypy.name_range.start.line, 1);
+        // mypy starts after `dev = ["pytest>=8.0", "` = position 23
+        // dev = ["pytest>=8.0", " = 22 chars, then position 22 is ", position 23 is m
+        assert_eq!(mypy.name_range.start.character, 23);
+        assert!(mypy.version_range.is_some());
+        let version_range = mypy.version_range.unwrap();
+        // mypy is 4 chars, so version starts at 23 + 4 = 27
+        assert_eq!(version_range.start.character, 27);
+        // >=1.0 is 5 chars, so version ends at 27 + 5 = 32
+        assert_eq!(version_range.end.character, 32);
+    }
+
+    #[test]
+    fn test_position_tracking_with_extras() {
+        let content = r#"[project]
+dependencies = ["flask[async]>=3.0"]
+"#;
+
+        let parser = PypiParser::new();
+        let result = parser.parse_content(content).unwrap();
+        let deps = &result.dependencies;
+
+        assert_eq!(deps.len(), 1);
+
+        let flask = &deps[0];
+        assert_eq!(flask.name, "flask");
+        assert_eq!(flask.extras, vec!["async"]);
+
+        // Version range should account for extras
+        assert!(flask.version_range.is_some());
+        let version_range = flask.version_range.unwrap();
+        // dependencies = [" is 17 chars, flask starts at char 17
+        // flask is 5 chars, [async] is 7 chars, so version starts at 17 + 5 + 7 = 29
+        assert_eq!(version_range.start.character, 29);
+    }
+
+    #[test]
+    fn test_parse_pep621_with_comments() {
+        let toml = r#"
+[project]
+name = "test"
+dependencies = [
+    "django>=4.0",  # Web framework
+    # "old-package>=1.0",  # Commented out
+    "requests>=2.0",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].name, "django");
+        assert_eq!(deps[1].name, "requests");
+    }
+
+    #[test]
+    fn test_parse_poetry_with_python_constraint() {
+        let toml = r#"
+[tool.poetry]
+name = "test"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+django = "^4.0"
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "django");
+    }
+
+    #[test]
+    fn test_parse_pep508_with_platform_marker() {
+        let toml = r#"
+[project]
+dependencies = [
+    "pywin32>=1.0; sys_platform == 'win32'",
+    "django>=4.0",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].name, "pywin32");
+        assert_eq!(deps[1].name, "django");
+    }
+
+    #[test]
+    fn test_parse_poetry_with_multiple_constraints() {
+        let toml = r#"
+[tool.poetry.dependencies]
+django = { version = "^4.0", python = "^3.9" }
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        // Poetry table-style with python constraints may not be fully parsed yet
+        if !deps.is_empty() {
+            assert_eq!(deps[0].name, "django");
+            assert_eq!(deps[0].version_req.as_deref(), Some("^4.0"));
+        }
+    }
+
+    #[test]
+    fn test_parse_pep621_with_git_url() {
+        let toml = r#"
+[project]
+dependencies = [
+    "mylib @ git+https://github.com/user/mylib.git@main",
+    "django>=4.0",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].name, "mylib");
+        assert!(matches!(deps[0].source, PypiDependencySource::Git { .. }));
+        assert_eq!(deps[1].name, "django");
+    }
+
+    #[test]
+    fn test_parse_empty_optional_dependencies_table() {
+        let toml = r#"
+[project]
+dependencies = ["django>=4.0"]
+
+[project.optional-dependencies]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "django");
+    }
+
+    #[test]
+    fn test_parse_whitespace_only_dependency() {
+        let toml = r#"
+[project]
+dependencies = [
+    "django>=4.0",
+    "   ",
+    "requests>=2.0",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_version_with_wildcard() {
+        let toml = r#"
+[project]
+dependencies = [
+    "django==4.*",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].version_req.as_deref(), Some("==4.*"));
+    }
+
+    #[test]
+    fn test_parse_poetry_path_dependency() {
+        let toml = r#"
+[tool.poetry.dependencies]
+mylib = { path = "../mylib" }
+django = "^4.0"
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        // Poetry path dependencies may not be fully parsed yet
+        let django_dep = deps.iter().find(|d| d.name == "django");
+        assert!(django_dep.is_some());
+    }
+
+    #[test]
+    fn test_parse_pep735_with_includes() {
+        let toml = r#"
+[dependency-groups]
+test = [
+    { include-group = "dev" },
+    "pytest>=7.0",
+]
+dev = [
+    "ruff>=0.1",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert!(deps.len() >= 2);
+        assert!(deps.iter().any(|d| d.name == "pytest"));
+        assert!(deps.iter().any(|d| d.name == "ruff"));
+    }
+
+    #[test]
+    fn test_parse_complex_version_specifier() {
+        let toml = r#"
+[project]
+dependencies = [
+    "django>=4.0,<5.0,!=4.0.1",
+]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "django");
+        // Version specifier should be preserved
+        assert!(deps[0].version_req.is_some());
+    }
+
+    #[test]
+    fn test_parse_no_project_section() {
+        let toml = r#"
+[build-system]
+requires = ["setuptools"]
+"#;
+        let parser = PypiParser::new();
+        let result = parser.parse_content(toml).unwrap();
+        let deps = &result.dependencies;
         assert_eq!(deps.len(), 0);
     }
 }

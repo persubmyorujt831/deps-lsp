@@ -1,0 +1,36 @@
+[package]
+name = "deps-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language Server Protocol implementation for dependency management"
+
+[[bin]]
+name = "deps-lsp"
+path = "src/main.rs"
+
+[lib]
+name = "deps_lsp"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+reqwest = { workspace = true, features = ["json", "gzip", "rustls-tls"] }
+semver = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "io-std"] }
+toml_edit = { workspace = true }
+tower-lsp = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["json"] }
+mockito = { workspace = true }
+tokio-test = { workspace = true }

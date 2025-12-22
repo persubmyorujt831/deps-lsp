@@ -1,0 +1,24 @@
+use deps_lsp::server::Backend;
+use tower_lsp::{LspService, Server};
+use tracing_subscriber::{fmt, EnvFilter};
+
+#[tokio::main]
+async fn main() {
+    // Initialize tracing with environment filter
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!("starting deps-lsp server");
+
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+
+    let (service, socket) = LspService::new(Backend::new);
+
+    Server::new(stdin, stdout, socket).serve(service).await;
+
+    tracing::info!("deps-lsp server stopped");
+}

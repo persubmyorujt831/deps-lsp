@@ -1,0 +1,21 @@
+[dependencies]
+# Inline format
+serde = "1.0"
+
+# Table format
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+
+# Git dependency
+my-crate = { git = "https://github.com/user/repo" }
+
+# Path dependency
+local-crate = { path = "../local" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[build-dependencies]
+cc = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = "0.3"

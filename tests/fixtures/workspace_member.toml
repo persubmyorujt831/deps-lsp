@@ -1,0 +1,4 @@
+[dependencies]
+serde.workspace = true
+tokio.workspace = true
+local-dep = "0.1"

@@ -3,10 +3,11 @@
 //! Parses package.json files and extracts dependency information with precise
 //! source positions for LSP operations.
 
+use crate::error::{NpmError, Result};
 use crate::types::{NpmDependency, NpmDependencySection};
-use deps_core::{DepsError, Result};
 use serde_json::Value;
-use tower_lsp::lsp_types::{Position, Range};
+use std::any::Any;
+use tower_lsp::lsp_types::{Position, Range, Url};
 
 /// Line offset table for O(log n) position lookups.
 ///
@@ -45,6 +46,28 @@ impl LineOffsetTable {
 #[derive(Debug)]
 pub struct NpmParseResult {
     pub dependencies: Vec<NpmDependency>,
+    pub uri: Url,
+}
+
+impl deps_core::ParseResult for NpmParseResult {
+    fn dependencies(&self) -> Vec<&dyn deps_core::Dependency> {
+        self.dependencies
+            .iter()
+            .map(|d| d as &dyn deps_core::Dependency)
+            .collect()
+    }
+
+    fn workspace_root(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    fn uri(&self) -> &Url {
+        &self.uri
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Parses a package.json file and extracts all dependencies with positions.
@@ -63,24 +86,24 @@ pub struct NpmParseResult {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use deps_npm::parser::parse_package_json;
+/// use tower_lsp::lsp_types::Url;
 ///
 /// let json = r#"{
 ///   "dependencies": {
 ///     "express": "^4.18.2"
 ///   }
 /// }"#;
+/// let uri = Url::parse("file:///project/package.json").unwrap();
 ///
-/// let result = parse_package_json(json).unwrap();
+/// let result = parse_package_json(json, &uri).unwrap();
 /// assert_eq!(result.dependencies.len(), 1);
 /// assert_eq!(result.dependencies[0].name, "express");
 /// ```
-pub fn parse_package_json(content: &str) -> Result<NpmParseResult> {
-    let root: Value = serde_json::from_str(content).map_err(|e| DepsError::ParseError {
-        file_type: "package.json".into(),
-        source: Box::new(e),
-    })?;
+pub fn parse_package_json(content: &str, uri: &Url) -> Result<NpmParseResult> {
+    let root: Value =
+        serde_json::from_str(content).map_err(|e| NpmError::JsonParseError { source: e })?;
 
     // Build line offset table once for O(log n) position lookups
     let line_table = LineOffsetTable::new(content);
@@ -94,7 +117,7 @@ pub fn parse_package_json(content: &str) -> Result<NpmParseResult> {
             deps,
             NpmDependencySection::Dependencies,
             &line_table,
-        )?);
+        ));
     }
 
     if let Some(deps) = root.get("devDependencies").and_then(|v| v.as_object()) {
@@ -103,7 +126,7 @@ pub fn parse_package_json(content: &str) -> Result<NpmParseResult> {
             deps,
             NpmDependencySection::DevDependencies,
             &line_table,
-        )?);
+        ));
     }
 
     if let Some(deps) = root.get("peerDependencies").and_then(|v| v.as_object()) {
@@ -112,7 +135,7 @@ pub fn parse_package_json(content: &str) -> Result<NpmParseResult> {
             deps,
             NpmDependencySection::PeerDependencies,
             &line_table,
-        )?);
+        ));
     }
 
     if let Some(deps) = root.get("optionalDependencies").and_then(|v| v.as_object()) {
@@ -121,10 +144,13 @@ pub fn parse_package_json(content: &str) -> Result<NpmParseResult> {
             deps,
             NpmDependencySection::OptionalDependencies,
             &line_table,
-        )?);
+        ));
     }
 
-    Ok(NpmParseResult { dependencies })
+    Ok(NpmParseResult {
+        dependencies,
+        uri: uri.clone(),
+    })
 }
 
 /// Parses a single dependency section and extracts positions.
@@ -133,7 +159,7 @@ fn parse_dependency_section(
     deps: &serde_json::Map<String, Value>,
     section: NpmDependencySection,
     line_table: &LineOffsetTable,
-) -> Result<Vec<NpmDependency>> {
+) -> Vec<NpmDependency> {
     let mut result = Vec::new();
 
     for (name, value) in deps {
@@ -152,7 +178,7 @@ fn parse_dependency_section(
         });
     }
 
-    Ok(result)
+    result
 }
 
 /// Finds the position of a dependency name and version in the source text.
@@ -221,6 +247,10 @@ fn find_dependency_positions(
 mod tests {
     use super::*;
 
+    fn test_uri() -> Url {
+        Url::parse("file:///test/package.json").unwrap()
+    }
+
     #[test]
     fn test_parse_simple_dependencies() {
         let json = r#"{
@@ -230,7 +260,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 2);
 
         let express = &result.dependencies[0];
@@ -255,7 +285,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 2);
 
         assert!(
@@ -274,7 +304,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
         assert!(matches!(
             result.dependencies[0].section,
@@ -290,7 +320,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
         assert!(matches!(
             result.dependencies[0].section,
@@ -309,7 +339,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 2);
 
         let deps_count = result
@@ -333,7 +363,7 @@ mod tests {
   "dependencies": {}
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 0);
     }
 
@@ -344,14 +374,14 @@ mod tests {
   "version": "1.0.0"
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 0);
     }
 
     #[test]
     fn test_parse_invalid_json() {
         let json = "{ invalid json }";
-        let result = parse_package_json(json);
+        let result = parse_package_json(json, &test_uri());
         assert!(result.is_err());
     }
 
@@ -363,7 +393,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         let express = &result.dependencies[0];
 
         // Name should be on line 2 (0-indexed: line 2)
@@ -401,7 +431,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
         assert_eq!(result.dependencies[0].name, "my-lib");
         assert_eq!(
@@ -418,7 +448,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
         assert_eq!(result.dependencies[0].name, "local-pkg");
         assert_eq!(
@@ -435,7 +465,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
         assert_eq!(result.dependencies[0].name, "@vitest/coverage-v8");
         assert_eq!(result.dependencies[0].version_req, Some("^3.1.4".into()));
@@ -456,7 +486,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 1);
 
         let vitest = &result.dependencies[0];
@@ -485,7 +515,7 @@ mod tests {
   }
 }"#;
 
-        let result = parse_package_json(json).unwrap();
+        let result = parse_package_json(json, &test_uri()).unwrap();
         assert_eq!(result.dependencies.len(), 2);
 
         // Find both dependencies

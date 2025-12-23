@@ -28,8 +28,9 @@
 //! assert_eq!(result.dependencies[0].name, "serde");
 //! ```
 
+use crate::error::{CargoError, Result};
 use crate::types::{DependencySection, DependencySource, ParsedDependency};
-use deps_core::{DepsError, Result};
+use std::any::Any;
 use std::path::PathBuf;
 use toml_edit::{Document, DocumentMut, Item, Table, Value};
 use tower_lsp::lsp_types::{Position, Range, Url};
@@ -44,6 +45,8 @@ pub struct ParseResult {
     pub dependencies: Vec<ParsedDependency>,
     /// Workspace root path if this is a workspace member
     pub workspace_root: Option<PathBuf>,
+    /// Document URI
+    pub uri: Url,
 }
 
 /// Pre-computed line start byte offsets for O(1) position lookups.
@@ -104,10 +107,8 @@ impl LineOffsetTable {
 /// ```
 pub fn parse_cargo_toml(content: &str, doc_uri: &Url) -> Result<ParseResult> {
     // Use Document (not DocumentMut) to preserve span information
-    let doc: Document<&str> = Document::parse(content).map_err(|e| DepsError::ParseError {
-        file_type: "Cargo.toml".into(),
-        source: Box::new(e),
-    })?;
+    let doc: Document<&str> =
+        Document::parse(content).map_err(|e| CargoError::TomlParseError { source: e })?;
 
     let line_table = LineOffsetTable::new(content);
     let mut dependencies = Vec::new();
@@ -164,6 +165,7 @@ pub fn parse_cargo_toml(content: &str, doc_uri: &Url) -> Result<ParseResult> {
     Ok(ParseResult {
         dependencies,
         workspace_root,
+        uri: doc_uri.clone(),
     })
 }
 
@@ -397,7 +399,7 @@ fn span_to_range_with_table(
 fn find_workspace_root(doc_uri: &Url) -> Result<Option<PathBuf>> {
     let path = doc_uri
         .to_file_path()
-        .map_err(|_| DepsError::CacheError("Invalid file URI".into()))?;
+        .map_err(|_| CargoError::invalid_uri(doc_uri.to_string()))?;
 
     let mut current = path.parent();
 
@@ -425,8 +427,8 @@ impl deps_core::ManifestParser for CargoParser {
     type Dependency = ParsedDependency;
     type ParseResult = ParseResult;
 
-    fn parse(&self, content: &str, doc_uri: &Url) -> Result<Self::ParseResult> {
-        parse_cargo_toml(content, doc_uri)
+    fn parse(&self, content: &str, doc_uri: &Url) -> deps_core::Result<Self::ParseResult> {
+        parse_cargo_toml(content, doc_uri).map_err(Into::into)
     }
 }
 
@@ -466,7 +468,7 @@ impl deps_core::DependencyInfo for ParsedDependency {
     }
 }
 
-// Implement ParseResultInfo trait for ParseResult
+// Implement ParseResultInfo trait for ParseResult (legacy)
 impl deps_core::ParseResultInfo for ParseResult {
     type Dependency = ParsedDependency;
 
@@ -476,6 +478,28 @@ impl deps_core::ParseResultInfo for ParseResult {
 
     fn workspace_root(&self) -> Option<&std::path::Path> {
         self.workspace_root.as_deref()
+    }
+}
+
+// Implement new ParseResult trait for trait object support
+impl deps_core::ParseResult for ParseResult {
+    fn dependencies(&self) -> Vec<&dyn deps_core::Dependency> {
+        self.dependencies
+            .iter()
+            .map(|d| d as &dyn deps_core::Dependency)
+            .collect()
+    }
+
+    fn workspace_root(&self) -> Option<&std::path::Path> {
+        self.workspace_root.as_deref()
+    }
+
+    fn uri(&self) -> &Url {
+        &self.uri
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

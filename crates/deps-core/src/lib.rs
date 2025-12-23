@@ -89,9 +89,12 @@
 //! ```
 
 pub mod cache;
+pub mod ecosystem;
+pub mod ecosystem_registry;
 pub mod error;
 pub mod handler;
 pub mod lockfile;
+pub mod lsp_helpers;
 pub mod macros;
 pub mod parser;
 pub mod registry;
@@ -99,14 +102,21 @@ pub mod version_matcher;
 
 // Re-export commonly used types
 pub use cache::{CachedResponse, HttpCache};
+pub use ecosystem::{Dependency, Ecosystem, EcosystemConfig, ParseResult};
+pub use ecosystem_registry::EcosystemRegistry;
 pub use error::{DepsError, Result};
 pub use handler::{
     DiagnosticsConfig, EcosystemHandler, InlayHintsConfig, VersionStringGetter, YankedChecker,
     generate_code_actions, generate_diagnostics, generate_hover, generate_inlay_hints,
 };
 pub use lockfile::{LockFileProvider, ResolvedPackage, ResolvedPackages, ResolvedSource};
+pub use lsp_helpers::{
+    EcosystemFormatter, generate_code_actions as lsp_generate_code_actions,
+    generate_diagnostics as lsp_generate_diagnostics, generate_hover as lsp_generate_hover,
+    generate_inlay_hints as lsp_generate_inlay_hints, is_same_major_minor, ranges_overlap,
+};
 pub use parser::{DependencyInfo, DependencySource, ManifestParser, ParseResultInfo};
-pub use registry::{PackageMetadata, PackageRegistry, VersionInfo};
+pub use registry::{Metadata, PackageMetadata, PackageRegistry, Registry, Version, VersionInfo};
 pub use version_matcher::{
     Pep440Matcher, SemverMatcher, VersionRequirementMatcher, extract_pypi_min_version,
     normalize_and_parse_version,

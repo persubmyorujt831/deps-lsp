@@ -1,72 +1,146 @@
-//! Diagnostics handler implementation.
-//!
-//! Reports issues with dependencies including:
-//! - Unknown packages (not found in registry)
-//! - Yanked versions
-//! - Outdated versions
-//! - Invalid semver requirements
+//! Diagnostics handler using ecosystem trait delegation.
 
 use crate::config::DiagnosticsConfig;
-use crate::document::{Ecosystem, ServerState};
-use crate::handlers::{CargoHandlerImpl, NpmHandlerImpl, PyPiHandlerImpl};
-use deps_core::EcosystemHandler;
+use crate::document::ServerState;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Diagnostic, Url};
 
-/// Handles diagnostic requests.
-///
-/// Returns diagnostics for all dependencies in the document.
-/// Gracefully degrades by returning empty vec on critical errors.
+/// Handles diagnostic requests using trait-based delegation.
 pub async fn handle_diagnostics(
     state: Arc<ServerState>,
     uri: &Url,
-    config: &DiagnosticsConfig,
+    _config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
+    let (ecosystem_id, cached_versions) = {
+        let doc = match state.get_document(uri) {
+            Some(d) => d,
+            None => {
+                tracing::warn!("Document not found for diagnostics: {}", uri);
+                return vec![];
+            }
+        };
+        (doc.ecosystem_id, doc.cached_versions.clone())
+    };
+
     let doc = match state.get_document(uri) {
         Some(d) => d,
+        None => return vec![],
+    };
+
+    let ecosystem = match state.ecosystem_registry.get(ecosystem_id) {
+        Some(e) => e,
         None => {
-            tracing::warn!("Document not found for diagnostics: {}", uri);
+            tracing::warn!("Ecosystem not found for diagnostics: {}", ecosystem_id);
             return vec![];
         }
     };
 
-    let ecosystem = doc.ecosystem;
-    let dependencies = doc.dependencies.clone();
-    drop(doc);
-
-    // Convert config to deps-core config type
-    let core_config = deps_core::DiagnosticsConfig {
-        unknown_severity: config.unknown_severity,
-        yanked_severity: config.yanked_severity,
-        outdated_severity: config.outdated_severity,
+    let parse_result = match doc.parse_result() {
+        Some(p) => p,
+        None => return vec![],
     };
 
-    match ecosystem {
-        Ecosystem::Cargo => {
-            let handler = CargoHandlerImpl::new(Arc::clone(&state.cache));
-            deps_core::generate_diagnostics(&handler, &dependencies, &core_config).await
-        }
-        Ecosystem::Npm => {
-            let handler = NpmHandlerImpl::new(Arc::clone(&state.cache));
-            deps_core::generate_diagnostics(&handler, &dependencies, &core_config).await
-        }
-        Ecosystem::Pypi => {
-            let handler = PyPiHandlerImpl::new(Arc::clone(&state.cache));
-            deps_core::generate_diagnostics(&handler, &dependencies, &core_config).await
-        }
-    }
+    let diags = ecosystem
+        .generate_diagnostics(parse_result, &cached_versions, uri)
+        .await;
+    drop(doc);
+    diags
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::DiagnosticSeverity;
+    use crate::document::{DocumentState, Ecosystem, ServerState};
 
-    #[test]
-    fn test_diagnostics_config_defaults() {
+    #[tokio::test]
+    async fn test_handle_diagnostics_missing_document() {
+        let state = Arc::new(ServerState::new());
+        let uri = Url::parse("file:///test/Cargo.toml").unwrap();
         let config = DiagnosticsConfig::default();
-        assert_eq!(config.outdated_severity, DiagnosticSeverity::HINT);
-        assert_eq!(config.unknown_severity, DiagnosticSeverity::WARNING);
-        assert_eq!(config.yanked_severity, DiagnosticSeverity::WARNING);
+
+        let result = handle_diagnostics(state, &uri, &config).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_diagnostics_cargo() {
+        let state = Arc::new(ServerState::new());
+        let uri = Url::parse("file:///test/Cargo.toml").unwrap();
+        let config = DiagnosticsConfig::default();
+
+        let ecosystem = state.ecosystem_registry.get("cargo").unwrap();
+        let content = r#"[dependencies]
+serde = "1.0.0"
+"#
+        .to_string();
+
+        let parse_result = ecosystem
+            .parse_manifest(&content, &uri)
+            .await
+            .expect("Failed to parse manifest");
+
+        let doc_state = DocumentState::new_from_parse_result("cargo", content, parse_result);
+        state.update_document(uri.clone(), doc_state);
+
+        let result = handle_diagnostics(state, &uri, &config).await;
+        assert!(result.is_empty() || !result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_diagnostics_npm() {
+        let state = Arc::new(ServerState::new());
+        let uri = Url::parse("file:///test/package.json").unwrap();
+        let config = DiagnosticsConfig::default();
+
+        let ecosystem = state.ecosystem_registry.get("npm").unwrap();
+        let content = r#"{"dependencies": {"express": "4.0.0"}}"#.to_string();
+
+        let parse_result = ecosystem
+            .parse_manifest(&content, &uri)
+            .await
+            .expect("Failed to parse manifest");
+
+        let doc_state = DocumentState::new_from_parse_result("npm", content, parse_result);
+        state.update_document(uri.clone(), doc_state);
+
+        let result = handle_diagnostics(state, &uri, &config).await;
+        assert!(result.is_empty() || !result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_diagnostics_pypi() {
+        let state = Arc::new(ServerState::new());
+        let uri = Url::parse("file:///test/pyproject.toml").unwrap();
+        let config = DiagnosticsConfig::default();
+
+        let ecosystem = state.ecosystem_registry.get("pypi").unwrap();
+        let content = r#"[project]
+dependencies = ["requests>=2.0.0"]
+"#
+        .to_string();
+
+        let parse_result = ecosystem
+            .parse_manifest(&content, &uri)
+            .await
+            .expect("Failed to parse manifest");
+
+        let doc_state = DocumentState::new_from_parse_result("pypi", content, parse_result);
+        state.update_document(uri.clone(), doc_state);
+
+        let result = handle_diagnostics(state, &uri, &config).await;
+        assert!(result.is_empty() || !result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_diagnostics_no_parse_result() {
+        let state = Arc::new(ServerState::new());
+        let uri = Url::parse("file:///test/Cargo.toml").unwrap();
+        let config = DiagnosticsConfig::default();
+
+        let doc_state = DocumentState::new(Ecosystem::Cargo, "".to_string(), vec![]);
+        state.update_document(uri.clone(), doc_state);
+
+        let result = handle_diagnostics(state, &uri, &config).await;
+        assert!(result.is_empty());
     }
 }

@@ -192,6 +192,23 @@ pub trait EcosystemHandler: Send + Sync + Sized {
     fn parse_version_req(
         version_req: &str,
     ) -> Option<<Self::Registry as PackageRegistry>::VersionReq>;
+
+    /// Get lock file provider for this ecosystem.
+    ///
+    /// Returns `None` if the ecosystem doesn't support lock files.
+    /// Default implementation returns `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Override in handler implementation:
+    /// fn lockfile_provider(&self) -> Option<Arc<dyn LockFileProvider>> {
+    ///     Some(Arc::new(MyLockParser))
+    /// }
+    /// ```
+    fn lockfile_provider(&self) -> Option<Arc<dyn crate::lockfile::LockFileProvider>> {
+        None
+    }
 }
 
 /// Configuration for inlay hint display.
@@ -244,6 +261,7 @@ pub trait YankedChecker {
 /// * `handler` - Ecosystem-specific handler instance
 /// * `dependencies` - List of dependencies to process
 /// * `cached_versions` - Previously cached version information
+/// * `resolved_versions` - Resolved versions from lock file
 /// * `config` - Display configuration
 ///
 /// # Returns
@@ -253,6 +271,7 @@ pub async fn generate_inlay_hints<H, UnifiedVer>(
     handler: &H,
     dependencies: &[H::UnifiedDep],
     cached_versions: &HashMap<String, UnifiedVer>,
+    resolved_versions: &HashMap<String, String>,
     config: &InlayHintsConfig,
 ) -> Vec<InlayHint>
 where
@@ -262,7 +281,6 @@ where
     let mut cached_deps = Vec::with_capacity(dependencies.len());
     let mut fetch_deps = Vec::with_capacity(dependencies.len());
 
-    // Separate deps into cached and needs-fetch
     for dep in dependencies {
         let Some(typed_dep) = H::extract_dependency(dep) else {
             continue;
@@ -289,13 +307,6 @@ where
         }
     }
 
-    tracing::debug!(
-        "inlay hints: {} cached, {} to fetch",
-        cached_deps.len(),
-        fetch_deps.len()
-    );
-
-    // Fetch missing versions in parallel
     let registry = handler.registry().clone();
     let futures: Vec<_> = fetch_deps
         .into_iter()
@@ -312,12 +323,16 @@ where
 
     let mut hints = Vec::new();
 
-    // Process cached deps
     for (name, version_req, version_range, latest_version, is_yanked) in cached_deps {
         if is_yanked {
             continue;
         }
-        let is_latest = H::is_version_latest(&version_req, &latest_version);
+        // Use resolved version from lock file if available, otherwise fall back to requirement
+        let version_to_compare = resolved_versions
+            .get(&name)
+            .map(String::as_str)
+            .unwrap_or(&version_req);
+        let is_latest = H::is_version_latest(version_to_compare, &latest_version);
         hints.push(create_hint::<H>(
             &name,
             version_range,
@@ -327,7 +342,6 @@ where
         ));
     }
 
-    // Process fetched deps
     for (name, version_req, version_range, result) in fetch_results {
         let Ok(versions): std::result::Result<Vec<<H::Registry as PackageRegistry>::Version>, _> =
             result
@@ -340,10 +354,16 @@ where
             .iter()
             .find(|v: &&<H::Registry as PackageRegistry>::Version| !v.is_yanked())
         else {
+            tracing::warn!("No non-yanked versions found for '{}'", name);
             continue;
         };
 
-        let is_latest = H::is_version_latest(&version_req, latest.version_string());
+        // Use resolved version from lock file if available, otherwise fall back to requirement
+        let version_to_compare = resolved_versions
+            .get(&name)
+            .map(String::as_str)
+            .unwrap_or(&version_req);
+        let is_latest = H::is_version_latest(version_to_compare, latest.version_string());
         hints.push(create_hint::<H>(
             &name,
             version_range,
@@ -356,9 +376,6 @@ where
     hints
 }
 
-/// Generic hint creation.
-///
-/// Uses ecosystem-specific URL and display name from the handler trait.
 #[inline]
 fn create_hint<H: EcosystemHandler>(
     name: &str,
@@ -413,9 +430,16 @@ fn create_hint<H: EcosystemHandler>(
 /// # Type Parameters
 ///
 /// * `H` - Ecosystem handler type
+///
+/// # Arguments
+///
+/// * `handler` - Ecosystem handler instance
+/// * `dep` - Dependency to generate hover for
+/// * `resolved_version` - Optional resolved version from lock file (preferred over manifest version)
 pub async fn generate_hover<H>(
     handler: &H,
     dep: &H::UnifiedDep,
+    resolved_version: Option<&str>,
 ) -> Option<tower_lsp::lsp_types::Hover>
 where
     H: EcosystemHandler,
@@ -431,8 +455,8 @@ where
     let url = H::package_url(typed_dep.name());
     let mut markdown = format!("# [{}]({})\n\n", typed_dep.name(), url);
 
-    if let Some(current) = typed_dep.version_requirement() {
-        markdown.push_str(&format!("**Current**: `{}`\n\n", current));
+    if let Some(version) = resolved_version.or(typed_dep.version_requirement()) {
+        markdown.push_str(&format!("**Current**: `{}`\n\n", version));
     }
 
     if latest.is_yanked() {
@@ -454,7 +478,6 @@ where
         ));
     }
 
-    // Features (if supported by ecosystem)
     let features = latest.features();
     if !features.is_empty() {
         markdown.push_str("\n**Features**:\n");
@@ -529,7 +552,6 @@ where
         CodeAction, CodeActionKind, CodeActionOrCommand, TextEdit, WorkspaceEdit,
     };
 
-    // Extract dependencies overlapping with selected range
     let mut deps_to_check = Vec::new();
     for dep in dependencies {
         let Some(typed_dep) = H::extract_dependency(dep) else {
@@ -552,7 +574,6 @@ where
         return vec![];
     }
 
-    // Fetch versions in parallel
     let registry = handler.registry().clone();
     let futures: Vec<_> = deps_to_check
         .iter()
@@ -569,7 +590,6 @@ where
 
     let results = join_all(futures).await;
 
-    // Generate actions
     let mut actions = Vec::new();
     for (name, dep, version_range, versions_result) in results {
         let Ok(versions) = versions_result else {
@@ -577,7 +597,6 @@ where
             continue;
         };
 
-        // Offer up to MAX_CODE_ACTION_VERSIONS non-deprecated versions
         for (i, version) in versions
             .iter()
             .filter(|v| !H::is_deprecated(v))
@@ -617,7 +636,6 @@ where
     actions
 }
 
-/// Helper: Check if two ranges overlap.
 fn ranges_overlap(a: Range, b: Range) -> bool {
     !(a.end.line < b.start.line
         || (a.end.line == b.start.line && a.end.character < b.start.character)
@@ -656,7 +674,6 @@ where
 {
     use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
 
-    // Extract typed dependencies
     let mut deps_to_check = Vec::new();
     for dep in dependencies {
         let Some(typed_dep) = H::extract_dependency(dep) else {
@@ -669,7 +686,6 @@ where
         return vec![];
     }
 
-    // Fetch versions in parallel
     let registry = handler.registry().clone();
     let futures: Vec<_> = deps_to_check
         .iter()
@@ -685,13 +701,11 @@ where
 
     let version_results = join_all(futures).await;
 
-    // Generate diagnostics
     let mut diagnostics = Vec::new();
 
     for (i, dep) in deps_to_check.iter().enumerate() {
         let (name, version_result) = &version_results[i];
 
-        // Check for unknown package
         let versions = match version_result {
             Ok(v) => v,
             Err(_) => {
@@ -706,11 +720,9 @@ where
             }
         };
 
-        // Check version requirement if present
         if let Some(version_req) = dep.version_requirement()
             && let Some(version_range) = dep.version_range()
         {
-            // Parse version requirement
             let Some(parsed_version_req) = H::parse_version_req(version_req) else {
                 diagnostics.push(Diagnostic {
                     range: version_range,
@@ -722,7 +734,6 @@ where
                 continue;
             };
 
-            // Get matching version (skip if registry call fails)
             let matching = handler
                 .registry()
                 .get_latest_matching(name, &parsed_version_req)
@@ -730,7 +741,6 @@ where
                 .ok()
                 .flatten();
 
-            // Check for yanked/deprecated version
             if let Some(current) = &matching
                 && H::is_deprecated(current)
             {
@@ -743,7 +753,6 @@ where
                 });
             }
 
-            // Check for outdated version
             let latest = versions.iter().find(|v| !H::is_deprecated(v));
             if let (Some(latest), Some(current)) = (latest, &matching)
                 && latest.version_string() != current.version_string()
@@ -1023,7 +1032,15 @@ mod tests {
         );
 
         let config = InlayHintsConfig::default();
-        let hints = generate_inlay_hints(&handler, &deps, &cached_versions, &config).await;
+        let resolved_versions: HashMap<String, String> = HashMap::new();
+        let hints = generate_inlay_hints(
+            &handler,
+            &deps,
+            &cached_versions,
+            &resolved_versions,
+            &config,
+        )
+        .await;
 
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].position.line, 0);
@@ -1053,7 +1070,15 @@ mod tests {
 
         let cached_versions: HashMap<String, MockVersion> = HashMap::new();
         let config = InlayHintsConfig::default();
-        let hints = generate_inlay_hints(&handler, &deps, &cached_versions, &config).await;
+        let resolved_versions: HashMap<String, String> = HashMap::new();
+        let hints = generate_inlay_hints(
+            &handler,
+            &deps,
+            &cached_versions,
+            &resolved_versions,
+            &config,
+        )
+        .await;
 
         assert_eq!(hints.len(), 1);
     }
@@ -1090,7 +1115,15 @@ mod tests {
         );
 
         let config = InlayHintsConfig::default();
-        let hints = generate_inlay_hints(&handler, &deps, &cached_versions, &config).await;
+        let resolved_versions: HashMap<String, String> = HashMap::new();
+        let hints = generate_inlay_hints(
+            &handler,
+            &deps,
+            &cached_versions,
+            &resolved_versions,
+            &config,
+        )
+        .await;
 
         assert_eq!(hints.len(), 0);
     }
@@ -1109,7 +1142,15 @@ mod tests {
 
         let cached_versions: HashMap<String, MockVersion> = HashMap::new();
         let config = InlayHintsConfig::default();
-        let hints = generate_inlay_hints(&handler, &deps, &cached_versions, &config).await;
+        let resolved_versions: HashMap<String, String> = HashMap::new();
+        let hints = generate_inlay_hints(
+            &handler,
+            &deps,
+            &cached_versions,
+            &resolved_versions,
+            &config,
+        )
+        .await;
 
         assert_eq!(hints.len(), 0);
     }
@@ -1137,7 +1178,15 @@ mod tests {
 
         let cached_versions: HashMap<String, MockVersion> = HashMap::new();
         let config = InlayHintsConfig::default();
-        let hints = generate_inlay_hints(&handler, &deps, &cached_versions, &config).await;
+        let resolved_versions: HashMap<String, String> = HashMap::new();
+        let hints = generate_inlay_hints(
+            &handler,
+            &deps,
+            &cached_versions,
+            &resolved_versions,
+            &config,
+        )
+        .await;
 
         assert_eq!(hints.len(), 0);
     }
@@ -1238,7 +1287,7 @@ mod tests {
             },
         };
 
-        let hover = generate_hover(&handler, &dep).await;
+        let hover = generate_hover(&handler, &dep, None).await;
 
         assert!(hover.is_some());
         let hover = hover.unwrap();
@@ -1266,7 +1315,7 @@ mod tests {
             name_range: Range::default(),
         };
 
-        let hover = generate_hover(&handler, &dep).await;
+        let hover = generate_hover(&handler, &dep, None).await;
 
         assert!(hover.is_some());
         let hover = hover.unwrap();
@@ -1291,7 +1340,7 @@ mod tests {
             name_range: Range::default(),
         };
 
-        let hover = generate_hover(&handler, &dep).await;
+        let hover = generate_hover(&handler, &dep, None).await;
         assert!(hover.is_none());
     }
 
@@ -1307,13 +1356,49 @@ mod tests {
             name_range: Range::default(),
         };
 
-        let hover = generate_hover(&handler, &dep).await;
+        let hover = generate_hover(&handler, &dep, None).await;
 
         assert!(hover.is_some());
         let hover = hover.unwrap();
 
         if let tower_lsp::lsp_types::HoverContents::Markup(content) = hover.contents {
             assert!(!content.value.contains("Current"));
+        } else {
+            panic!("Expected Markup content");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_hover_with_resolved_version() {
+        let cache = Arc::new(HttpCache::new());
+        let handler = MockHandler::new(cache);
+
+        let dep = MockDependency {
+            name: "serde".to_string(),
+            version_req: Some("1.0".to_string()), // Manifest has short version
+            version_range: Some(Range::default()),
+            name_range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 5,
+                },
+            },
+        };
+
+        // Pass resolved version from lock file (full version)
+        let hover = generate_hover(&handler, &dep, Some("1.0.195")).await;
+
+        assert!(hover.is_some());
+        let hover = hover.unwrap();
+
+        if let tower_lsp::lsp_types::HoverContents::Markup(content) = hover.contents {
+            // Should show the resolved version (1.0.195) not manifest version (1.0)
+            assert!(content.value.contains("**Current**: `1.0.195`"));
+            assert!(!content.value.contains("**Current**: `1.0`"));
         } else {
             panic!("Expected Markup content");
         }

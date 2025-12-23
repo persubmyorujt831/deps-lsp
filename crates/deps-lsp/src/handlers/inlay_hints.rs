@@ -31,26 +31,12 @@ pub async fn handle_inlay_hints(
 ) -> Vec<InlayHint> {
     let uri = &params.text_document.uri;
 
-    tracing::info!(
-        "inlay_hint request: uri={}, range={}:{}-{}:{}",
-        uri,
-        params.range.start.line,
-        params.range.start.character,
-        params.range.end.line,
-        params.range.end.character
-    );
-
     if !config.enabled {
-        tracing::debug!("inlay hints disabled in config");
         return vec![];
     }
 
-    let doc = match state.get_document(uri) {
-        Some(d) => d,
-        None => {
-            tracing::warn!("Document not found for inlay hints: {}", uri);
-            return vec![];
-        }
+    let Some(doc) = state.get_document(uri) else {
+        return vec![];
     };
 
     let ecosystem = doc.ecosystem;
@@ -64,16 +50,8 @@ pub async fn handle_inlay_hints(
         .cloned()
         .collect();
 
-    // Get cached versions before dropping doc
     let cached_versions = doc.versions.clone();
-
-    tracing::info!(
-        "inlay hints: found {} dependencies to fetch (total {} in doc, {} cached)",
-        deps_to_fetch.len(),
-        doc.dependencies.len(),
-        cached_versions.len()
-    );
-
+    let resolved_versions = doc.resolved_versions.clone();
     drop(doc);
 
     let core_config = deps_core::InlayHintsConfig {
@@ -82,23 +60,41 @@ pub async fn handle_inlay_hints(
         needs_update_text: config.needs_update_text.clone(),
     };
 
-    let hints = match ecosystem {
+    match ecosystem {
         Ecosystem::Cargo => {
             let handler = CargoHandlerImpl::new(Arc::clone(&state.cache));
-            generate_inlay_hints(&handler, &deps_to_fetch, &cached_versions, &core_config).await
+            generate_inlay_hints(
+                &handler,
+                &deps_to_fetch,
+                &cached_versions,
+                &resolved_versions,
+                &core_config,
+            )
+            .await
         }
         Ecosystem::Npm => {
             let handler = NpmHandlerImpl::new(Arc::clone(&state.cache));
-            generate_inlay_hints(&handler, &deps_to_fetch, &cached_versions, &core_config).await
+            generate_inlay_hints(
+                &handler,
+                &deps_to_fetch,
+                &cached_versions,
+                &resolved_versions,
+                &core_config,
+            )
+            .await
         }
         Ecosystem::Pypi => {
             let handler = PyPiHandlerImpl::new(Arc::clone(&state.cache));
-            generate_inlay_hints(&handler, &deps_to_fetch, &cached_versions, &core_config).await
+            generate_inlay_hints(
+                &handler,
+                &deps_to_fetch,
+                &cached_versions,
+                &resolved_versions,
+                &core_config,
+            )
+            .await
         }
-    };
-
-    tracing::info!("returning {} inlay hints", hints.len());
-    hints
+    }
 }
 
 #[cfg(test)]

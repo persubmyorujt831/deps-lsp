@@ -49,25 +49,37 @@ pub async fn handle_hover(state: Arc<ServerState>, params: HoverParams) -> Optio
 
     let ecosystem = doc.ecosystem;
     let dep = dep.clone();
+    let dep_name = dep.name();
+    tracing::debug!(
+        "Hover: looking up '{}' in resolved_versions ({} entries): {:?}",
+        dep_name,
+        doc.resolved_versions.len(),
+        doc.resolved_versions.keys().take(5).collect::<Vec<_>>()
+    );
+    let resolved_version = doc.resolved_versions.get(dep_name).cloned();
+    tracing::debug!(
+        "Hover: resolved_version for '{}' = {:?}",
+        dep_name,
+        resolved_version
+    );
     drop(doc);
 
     match ecosystem {
         Ecosystem::Cargo => {
             let handler = CargoHandlerImpl::new(Arc::clone(&state.cache));
-            generate_hover(&handler, &dep).await
+            generate_hover(&handler, &dep, resolved_version.as_deref()).await
         }
         Ecosystem::Npm => {
             let handler = NpmHandlerImpl::new(Arc::clone(&state.cache));
-            generate_hover(&handler, &dep).await
+            generate_hover(&handler, &dep, resolved_version.as_deref()).await
         }
         Ecosystem::Pypi => {
             let handler = PyPiHandlerImpl::new(Arc::clone(&state.cache));
-            generate_hover(&handler, &dep).await
+            generate_hover(&handler, &dep, resolved_version.as_deref()).await
         }
     }
 }
 
-/// Checks if a position is within a range.
 fn position_in_range(pos: Position, range: Range) -> bool {
     (pos.line > range.start.line
         || (pos.line == range.start.line && pos.character >= range.start.character))

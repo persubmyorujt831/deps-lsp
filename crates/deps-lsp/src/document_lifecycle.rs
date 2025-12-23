@@ -70,25 +70,68 @@ where
         Fn(<H::Registry as PackageRegistry>::Version) -> UnifiedVersion + Send + 'static + Clone,
     ShouldFetch: Fn(&H::Dependency) -> bool + Send + 'static + Clone,
 {
-    // Step 1: Parse manifest
     let parse_result = parse_fn(&content, &uri)?;
     let dependencies: Vec<H::Dependency> = parse_result.into_iter().collect();
 
-    // Step 2: Wrap dependencies
     let unified_deps: Vec<UnifiedDependency> = dependencies.into_iter().map(wrap_dep_fn).collect();
+    let lockfile_versions = {
+        let cache = Arc::clone(&state.cache);
+        let handler = H::new(cache);
 
-    // Step 3: Create document state
-    let doc_state = DocumentState::new(ecosystem, content, unified_deps);
+        if let Some(provider) = handler.lockfile_provider() {
+            if let Some(lockfile_path) = provider.locate_lockfile(&uri) {
+                match state
+                    .lockfile_cache
+                    .get_or_parse(provider.as_ref(), &lockfile_path)
+                    .await
+                {
+                    Ok(resolved) => {
+                        tracing::info!(
+                            "Loaded lock file: {} packages from {}",
+                            resolved.len(),
+                            lockfile_path.display()
+                        );
+                        Some(resolved)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse lock file: {}", e);
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!("No lock file found for {}", uri);
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let mut doc_state = DocumentState::new(ecosystem, content, unified_deps);
+    if let Some(resolved) = lockfile_versions {
+        let resolved_versions: HashMap<String, String> = resolved
+            .iter()
+            .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
+            .collect();
+
+        tracing::info!(
+            "Populated {} resolved versions from lock file: {:?}",
+            resolved_versions.len(),
+            resolved_versions.keys().take(10).collect::<Vec<_>>()
+        );
+        doc_state.update_resolved_versions(resolved_versions);
+    } else {
+        tracing::warn!("No lock file versions found for {}", uri);
+    }
+
     state.update_document(uri.clone(), doc_state);
 
-    // Step 4: Spawn background version fetch task
     let uri_clone = uri.clone();
     let task = tokio::spawn(async move {
         let cache = Arc::clone(&state.cache);
         let handler = H::new(cache);
         let registry = handler.registry().clone();
 
-        // Collect dependencies to fetch (avoid holding doc lock during fetch)
         let deps_to_fetch: Vec<_> = {
             let doc = match state.get_document(&uri_clone) {
                 Some(d) => d,
@@ -107,7 +150,6 @@ where
                 .collect()
         };
 
-        // Parallel fetch all versions
         let futures: Vec<_> = deps_to_fetch
             .into_iter()
             .map(|name| {
@@ -124,12 +166,10 @@ where
         let results = join_all(futures).await;
         let versions: HashMap<_, _> = results.into_iter().flatten().collect();
 
-        // Update document with fetched versions
         if let Some(mut doc) = state.documents.get_mut(&uri_clone) {
             doc.update_versions(versions);
         }
 
-        // Publish diagnostics
         let config_read = config.read().await;
         let diags = diagnostics::handle_diagnostics(
             Arc::clone(&state),
@@ -138,7 +178,14 @@ where
         )
         .await;
 
-        client.publish_diagnostics(uri_clone, diags, None).await;
+        client
+            .publish_diagnostics(uri_clone.clone(), diags, None)
+            .await;
+
+        // Refresh inlay hints after versions are fetched
+        if let Err(e) = client.inlay_hint_refresh().await {
+            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
+        }
     });
 
     Ok(task)
@@ -187,24 +234,28 @@ where
     ParseResult: IntoIterator<Item = H::Dependency>,
     WrapDep: Fn(H::Dependency) -> UnifiedDependency,
 {
-    // Step 1: Parse manifest
     let parse_result = parse_fn(&content, &uri)?;
     let dependencies: Vec<H::Dependency> = parse_result.into_iter().collect();
 
-    // Step 2: Wrap dependencies
     let unified_deps: Vec<UnifiedDependency> = dependencies.into_iter().map(wrap_dep_fn).collect();
 
-    // Step 3: Update document state
-    let doc_state = DocumentState::new(ecosystem, content, unified_deps);
+    // Preserve existing resolved_versions from lock file when updating
+    let existing_resolved = state
+        .get_document(&uri)
+        .map(|doc| doc.resolved_versions.clone())
+        .unwrap_or_default();
+
+    let mut doc_state = DocumentState::new(ecosystem, content, unified_deps);
+    if !existing_resolved.is_empty() {
+        doc_state.update_resolved_versions(existing_resolved);
+    }
     state.update_document(uri.clone(), doc_state);
 
-    // Step 4: Spawn debounced diagnostics update task
     let uri_clone = uri.clone();
     let task = tokio::spawn(async move {
-        // Debounce: wait 100ms for rapid edits to settle
+        // Debounce: wait for rapid edits to settle
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Publish diagnostics
         let config_read = config.read().await;
         let diags = diagnostics::handle_diagnostics(
             Arc::clone(&state),
@@ -217,7 +268,6 @@ where
             .publish_diagnostics(uri_clone.clone(), diags, None)
             .await;
 
-        // Request inlay hints refresh
         if let Err(e) = client.inlay_hint_refresh().await {
             tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
         }

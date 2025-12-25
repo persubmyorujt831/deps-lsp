@@ -29,8 +29,8 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    # Auto-merge patch versions (requires auto-merge workflow)
-    versioning-strategy: increase
+    # Use default versioning strategy for Cargo
+    versioning-strategy: auto
     ignore:
       # Ignore major version updates for stable dependencies
       - dependency-name: "tokio"

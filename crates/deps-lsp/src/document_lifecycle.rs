@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tower_lsp::Client;
-use tower_lsp::lsp_types::Url;
+use tower_lsp_server::Client;
+use tower_lsp_server::ls_types::Uri;
 
 /// Fetches latest versions for multiple packages in parallel.
 ///
@@ -60,7 +60,7 @@ async fn fetch_latest_versions_parallel(
 /// Parses manifest using the ecosystem's parser, creates document state,
 /// and spawns a background task to fetch version information from the registry.
 pub async fn handle_document_open(
-    uri: Url,
+    uri: Uri,
     content: String,
     state: Arc<ServerState>,
     client: Client,
@@ -70,24 +70,30 @@ pub async fn handle_document_open(
     let ecosystem = match state.ecosystem_registry.get_for_uri(&uri) {
         Some(e) => e,
         None => {
-            tracing::debug!("No ecosystem handler for {}", uri);
-            return Err(deps_core::error::DepsError::UnsupportedEcosystem(
-                uri.to_string(),
-            ));
+            tracing::debug!("No ecosystem handler for {:?}", uri);
+            return Err(deps_core::error::DepsError::UnsupportedEcosystem(format!(
+                "{:?}",
+                uri
+            )));
         }
     };
 
     tracing::info!(
-        "Opening {} with ecosystem: {}",
+        "Opening {:?} with ecosystem: {}",
         uri,
         ecosystem.display_name()
     );
 
-    // Parse manifest
-    let parse_result = ecosystem.parse_manifest(&content, &uri).await?;
+    // Try to parse manifest (may fail for incomplete syntax)
+    let parse_result = ecosystem.parse_manifest(&content, &uri).await.ok();
 
-    // Create document state
-    let doc_state = DocumentState::new_from_parse_result(ecosystem.id(), content, parse_result);
+    // Create document state (parse_result may be None)
+    let doc_state = if let Some(pr) = parse_result {
+        DocumentState::new_from_parse_result(ecosystem.id(), content, pr)
+    } else {
+        tracing::debug!("Failed to parse manifest, storing document without parse result");
+        DocumentState::new_without_parse_result(ecosystem.id(), content)
+    };
 
     state.update_document(uri.clone(), doc_state);
 
@@ -165,7 +171,7 @@ pub async fn handle_document_open(
 /// Re-parses manifest when document content changes and spawns a debounced
 /// task to update diagnostics and request inlay hint refresh.
 pub async fn handle_document_change(
-    uri: Url,
+    uri: Uri,
     content: String,
     state: Arc<ServerState>,
     client: Client,
@@ -175,18 +181,24 @@ pub async fn handle_document_change(
     let ecosystem = match state.ecosystem_registry.get_for_uri(&uri) {
         Some(e) => e,
         None => {
-            tracing::debug!("No ecosystem handler for {}", uri);
-            return Err(deps_core::error::DepsError::UnsupportedEcosystem(
-                uri.to_string(),
-            ));
+            tracing::debug!("No ecosystem handler for {:?}", uri);
+            return Err(deps_core::error::DepsError::UnsupportedEcosystem(format!(
+                "{:?}",
+                uri
+            )));
         }
     };
 
-    // Parse manifest
-    let parse_result = ecosystem.parse_manifest(&content, &uri).await?;
+    // Try to parse manifest (may fail for incomplete syntax)
+    let parse_result = ecosystem.parse_manifest(&content, &uri).await.ok();
 
-    // Update document state
-    let doc_state = DocumentState::new_from_parse_result(ecosystem.id(), content, parse_result);
+    // Create document state (parse_result may be None)
+    let doc_state = if let Some(pr) = parse_result {
+        DocumentState::new_from_parse_result(ecosystem.id(), content, pr)
+    } else {
+        tracing::debug!("Failed to parse manifest, storing document without parse result");
+        DocumentState::new_without_parse_result(ecosystem.id(), content)
+    };
 
     state.update_document(uri.clone(), doc_state);
 
@@ -268,7 +280,7 @@ pub async fn handle_document_change(
 /// Returns a HashMap mapping package names to their resolved versions.
 /// Returns an empty HashMap if no lock file is found or parsing fails.
 async fn load_resolved_versions(
-    uri: &Url,
+    uri: &Uri,
     state: &ServerState,
     ecosystem: &dyn Ecosystem,
 ) -> HashMap<String, String> {
@@ -283,7 +295,7 @@ async fn load_resolved_versions(
     let lockfile_path = match lock_provider.locate_lockfile(uri) {
         Some(path) => path,
         None => {
-            tracing::debug!("No lock file found for {}", uri);
+            tracing::debug!("No lock file found for {:?}", uri);
             return HashMap::new();
         }
     };
@@ -319,23 +331,27 @@ mod tests {
     fn test_ecosystem_registry_lookup() {
         let state = ServerState::new();
 
-        let cargo_uri = tower_lsp::lsp_types::Url::parse("file:///test/Cargo.toml").unwrap();
+        let cargo_uri =
+            tower_lsp_server::ls_types::Uri::from_file_path("/test/Cargo.toml").unwrap();
         assert!(state.ecosystem_registry.get_for_uri(&cargo_uri).is_some());
 
-        let npm_uri = tower_lsp::lsp_types::Url::parse("file:///test/package.json").unwrap();
+        let npm_uri =
+            tower_lsp_server::ls_types::Uri::from_file_path("/test/package.json").unwrap();
         assert!(state.ecosystem_registry.get_for_uri(&npm_uri).is_some());
 
-        let pypi_uri = tower_lsp::lsp_types::Url::parse("file:///test/pyproject.toml").unwrap();
+        let pypi_uri =
+            tower_lsp_server::ls_types::Uri::from_file_path("/test/pyproject.toml").unwrap();
         assert!(state.ecosystem_registry.get_for_uri(&pypi_uri).is_some());
 
-        let unknown_uri = tower_lsp::lsp_types::Url::parse("file:///test/unknown.txt").unwrap();
+        let unknown_uri =
+            tower_lsp_server::ls_types::Uri::from_file_path("/test/unknown.txt").unwrap();
         assert!(state.ecosystem_registry.get_for_uri(&unknown_uri).is_none());
     }
 
     #[tokio::test]
     async fn test_document_parsing_cargo() {
         let state = Arc::new(ServerState::new());
-        let uri = tower_lsp::lsp_types::Url::parse("file:///test/Cargo.toml").unwrap();
+        let uri = tower_lsp_server::ls_types::Uri::from_file_path("/test/Cargo.toml").unwrap();
         let content = r#"[dependencies]
 serde = "1.0"
 "#;
@@ -363,7 +379,7 @@ serde = "1.0"
     #[tokio::test]
     async fn test_document_parsing_npm() {
         let state = Arc::new(ServerState::new());
-        let uri = tower_lsp::lsp_types::Url::parse("file:///test/package.json").unwrap();
+        let uri = tower_lsp_server::ls_types::Uri::from_file_path("/test/package.json").unwrap();
         let content = r#"{"dependencies": {"express": "^4.18.0"}}"#;
 
         let ecosystem = state
@@ -385,7 +401,7 @@ serde = "1.0"
     #[tokio::test]
     async fn test_document_parsing_pypi() {
         let state = Arc::new(ServerState::new());
-        let uri = tower_lsp::lsp_types::Url::parse("file:///test/pyproject.toml").unwrap();
+        let uri = tower_lsp_server::ls_types::Uri::from_file_path("/test/pyproject.toml").unwrap();
         let content = r#"[project]
 dependencies = ["requests>=2.0.0"]
 "#;
@@ -407,5 +423,51 @@ dependencies = ["requests>=2.0.0"]
 
         let doc = state.get_document(&uri).unwrap();
         assert_eq!(doc.ecosystem_id, "pypi");
+    }
+
+    #[tokio::test]
+    async fn test_document_stored_even_when_parsing_fails() {
+        let state = Arc::new(ServerState::new());
+        let uri = tower_lsp_server::ls_types::Uri::from_file_path("/test/Cargo.toml").unwrap();
+        // Invalid TOML that will fail parsing
+        let content = r#"[dependencies
+serde = "1.0"
+"#;
+
+        let ecosystem = state
+            .ecosystem_registry
+            .get_for_uri(&uri)
+            .expect("Cargo ecosystem not found");
+
+        // Try to parse (will fail)
+        let parse_result = ecosystem.parse_manifest(content, &uri).await.ok();
+        assert!(
+            parse_result.is_none(),
+            "Parsing should fail for invalid TOML"
+        );
+
+        // Create document state without parse result
+        let doc_state = if let Some(pr) = parse_result {
+            DocumentState::new_from_parse_result("cargo", content.to_string(), pr)
+        } else {
+            DocumentState::new_without_parse_result("cargo", content.to_string())
+        };
+
+        state.update_document(uri.clone(), doc_state);
+
+        // Document should be stored despite parse failure
+        let doc = state.get_document(&uri);
+        assert!(
+            doc.is_some(),
+            "Document should be stored even when parsing fails"
+        );
+
+        let doc = doc.unwrap();
+        assert_eq!(doc.ecosystem_id, "cargo");
+        assert_eq!(doc.content, content);
+        assert!(
+            doc.parse_result().is_none(),
+            "Parse result should be None for failed parse"
+        );
     }
 }

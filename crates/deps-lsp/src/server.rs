@@ -1,6 +1,7 @@
 use crate::config::DepsConfig;
 use crate::document::ServerState;
 use crate::document_lifecycle;
+use crate::file_watcher;
 use crate::handlers::{code_actions, completion, diagnostics, hover, inlay_hints};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,13 +9,13 @@ use tokio::sync::RwLock;
 use tower_lsp_server::ls_types::{
     CodeActionOptions, CodeActionParams, CodeActionProviderCapability, CompletionOptions,
     CompletionParams, CompletionResponse, DiagnosticOptions, DiagnosticServerCapabilities,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
-    ExecuteCommandOptions, ExecuteCommandParams, FullDocumentDiagnosticReport, Hover, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, InlayHint,
-    InlayHintParams, MessageType, OneOf, Range, RelatedFullDocumentDiagnosticReport,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Uri, WorkspaceEdit,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentDiagnosticReportResult, ExecuteCommandOptions, ExecuteCommandParams,
+    FullDocumentDiagnosticReport, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, InlayHint, InlayHintParams, MessageType, OneOf, Range,
+    RelatedFullDocumentDiagnosticReport, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 use tower_lsp_server::{Client, LanguageServer, jsonrpc::Result};
 
@@ -82,6 +83,92 @@ impl Backend {
         }
     }
 
+    async fn handle_lockfile_change(&self, lockfile_path: &std::path::Path, ecosystem_id: &str) {
+        let Some(ecosystem) = self.state.ecosystem_registry.get(ecosystem_id) else {
+            tracing::error!("Unknown ecosystem: {}", ecosystem_id);
+            return;
+        };
+
+        let Some(lock_provider) = ecosystem.lockfile_provider() else {
+            tracing::warn!("Ecosystem {} has no lock file provider", ecosystem_id);
+            return;
+        };
+
+        // Find all open documents using this lock file
+        let affected_uris: Vec<Uri> = self
+            .state
+            .documents
+            .iter()
+            .filter_map(|entry| {
+                let uri = entry.key();
+                let doc = entry.value();
+                if doc.ecosystem_id != ecosystem_id {
+                    return None;
+                }
+                let doc_lockfile = lock_provider.locate_lockfile(uri)?;
+                if doc_lockfile == lockfile_path {
+                    Some(uri.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if affected_uris.is_empty() {
+            tracing::debug!(
+                "No open manifests affected by lock file: {}",
+                lockfile_path.display()
+            );
+            return;
+        }
+
+        tracing::info!(
+            "Updating {} manifest(s) affected by lock file change",
+            affected_uris.len()
+        );
+
+        // Reload lock file (cache was invalidated, so this re-parses)
+        let resolved_versions = match self
+            .state
+            .lockfile_cache
+            .get_or_parse(lock_provider.as_ref(), lockfile_path)
+            .await
+        {
+            Ok(packages) => packages
+                .iter()
+                .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
+                .collect::<HashMap<String, String>>(),
+            Err(e) => {
+                tracing::error!("Failed to reload lock file: {}", e);
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to reload lock file: {}", e),
+                    )
+                    .await;
+                HashMap::new()
+            }
+        };
+
+        let config = self.config.read().await;
+
+        for uri in affected_uris {
+            if let Some(mut doc) = self.state.documents.get_mut(&uri) {
+                doc.update_resolved_versions(resolved_versions.clone());
+            }
+
+            let items =
+                diagnostics::handle_diagnostics(Arc::clone(&self.state), &uri, &config.diagnostics)
+                    .await;
+
+            self.client.publish_diagnostics(uri, items, None).await;
+        }
+
+        if let Err(e) = self.client.inlay_hint_refresh().await {
+            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
+        }
+    }
+
     fn server_capabilities() -> ServerCapabilities {
         ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -137,6 +224,18 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "deps-lsp ready")
             .await;
+
+        // Register lock file watchers using patterns from all ecosystems
+        let patterns = self.state.ecosystem_registry.all_lockfile_patterns();
+        if let Err(e) = file_watcher::register_lock_file_watchers(&self.client, &patterns).await {
+            tracing::warn!("Failed to register file watchers: {}", e);
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("File watching disabled: {}", e),
+                )
+                .await;
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -181,6 +280,35 @@ impl LanguageServer for Backend {
 
         self.state.remove_document(&uri);
         self.state.cancel_background_task(&uri).await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        tracing::debug!("Received {} file change events", params.changes.len());
+
+        for change in params.changes {
+            let Some(path) = change.uri.to_file_path() else {
+                tracing::warn!("Invalid file path in change event: {:?}", change.uri);
+                continue;
+            };
+
+            let Some(filename) = file_watcher::extract_lockfile_name(&path) else {
+                continue;
+            };
+
+            let Some(ecosystem) = self.state.ecosystem_registry.get_for_lockfile(filename) else {
+                tracing::debug!("Skipping non-lock-file change: {}", filename);
+                continue;
+            };
+
+            tracing::info!(
+                "Lock file changed: {} (ecosystem: {})",
+                filename,
+                ecosystem.id()
+            );
+
+            self.state.lockfile_cache.invalidate(&path);
+            self.handle_lockfile_change(&path, ecosystem.id()).await;
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

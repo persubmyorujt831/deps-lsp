@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "deps-cargo"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "criterion",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "deps-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -402,8 +402,9 @@ dependencies = [
 
 [[package]]
 name = "deps-lsp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "criterion",
  "dashmap",
  "deps-cargo",
  "deps-core",
@@ -415,6 +416,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-test",
  "tower-lsp-server",
@@ -424,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "deps-npm"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "criterion",
@@ -443,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "deps-pypi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "criterion",

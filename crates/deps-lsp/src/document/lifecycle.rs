@@ -7,10 +7,10 @@ use super::loader::load_document_from_disk;
 use super::state::{DocumentState, ServerState};
 use crate::config::DepsConfig;
 use crate::handlers::diagnostics;
+use crate::progress::RegistryProgress;
 use deps_core::Ecosystem;
 use deps_core::Registry;
 use deps_core::Result;
-use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,13 +18,19 @@ use tokio::task::JoinHandle;
 use tower_lsp_server::Client;
 use tower_lsp_server::ls_types::{MessageType, Uri};
 
-/// Fetches latest versions for multiple packages in parallel.
+/// Fetches latest versions for multiple packages in parallel with progress reporting.
 ///
 /// Returns a HashMap mapping package names to their latest version strings.
 /// Packages that fail to fetch are omitted from the result.
 ///
 /// This function executes all registry requests concurrently, reducing
 /// total fetch time from O(N × network_latency) to O(max(network_latency)).
+///
+/// # Arguments
+///
+/// * `registry` - Package registry to fetch from
+/// * `package_names` - List of package names to fetch
+/// * `progress` - Optional progress tracker (will be updated after each fetch)
 ///
 /// # Examples
 ///
@@ -34,13 +40,20 @@ use tower_lsp_server::ls_types::{MessageType, Uri};
 async fn fetch_latest_versions_parallel(
     registry: Arc<dyn Registry>,
     package_names: Vec<String>,
+    progress: Option<&RegistryProgress>,
 ) -> HashMap<String, String> {
-    let futures: Vec<_> = package_names
-        .into_iter()
+    use futures::stream::{self, StreamExt};
+
+    let total = package_names.len();
+    let fetched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Process fetches concurrently while reporting progress
+    let results: Vec<_> = stream::iter(package_names)
         .map(|name| {
             let registry = Arc::clone(&registry);
+            let fetched = Arc::clone(&fetched);
             async move {
-                registry
+                let result = registry
                     .get_versions(&name)
                     .await
                     .ok()
@@ -48,12 +61,22 @@ async fn fetch_latest_versions_parallel(
                         // Use shared utility for consistent behavior with diagnostics
                         deps_core::find_latest_stable(&versions)
                             .map(|v| (name, v.version_string().to_string()))
-                    })
+                    });
+
+                // Increment counter and report progress
+                let count = fetched.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if let Some(progress) = progress {
+                    progress.update(count, total).await;
+                }
+
+                result
             }
         })
-        .collect();
+        .buffer_unordered(10) // Limit concurrent requests to avoid overwhelming the registry
+        .collect()
+        .await;
 
-    join_all(futures).await.into_iter().flatten().collect()
+    results.into_iter().flatten().collect()
 }
 
 /// Generic document open handler using ecosystem registry.
@@ -134,27 +157,51 @@ pub async fn handle_document_open(
                 .collect()
         };
 
+        // Mark as loading and start progress
+        if let Some(mut doc) = state_clone.documents.get_mut(&uri_clone) {
+            doc.set_loading();
+        }
+
+        let progress =
+            RegistryProgress::start(client_clone.clone(), uri_clone.as_str(), dep_names.len())
+                .await
+                .ok(); // Ignore errors if client doesn't support progress
+
         // Fetch latest versions from registry in parallel (for update hints)
         let registry = ecosystem_clone.registry();
-        let cached_versions = fetch_latest_versions_parallel(registry, dep_names).await;
+        let cached_versions =
+            fetch_latest_versions_parallel(registry, dep_names, progress.as_ref()).await;
+
+        let success = !cached_versions.is_empty();
 
         // Update document state with cached versions (latest from registry)
         if let Some(mut doc) = state_clone.documents.get_mut(&uri_clone) {
             doc.update_cached_versions(cached_versions);
+            if success {
+                doc.set_loaded();
+            } else {
+                doc.set_failed();
+            }
         }
 
-        // Publish diagnostics (using internal version to avoid recursive cold start)
+        // End progress
+        if let Some(progress) = progress {
+            progress.end(success).await;
+        }
+
+        // Refresh inlay hints IMMEDIATELY after loading completes
+        // (before diagnostics which may take longer due to additional network calls)
+        if let Err(e) = client_clone.inlay_hint_refresh().await {
+            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
+        }
+
+        // Publish diagnostics (may be slower, runs after hints are already visible)
         let diags =
             diagnostics::generate_diagnostics_internal(Arc::clone(&state_clone), &uri_clone).await;
 
         client_clone
             .publish_diagnostics(uri_clone.clone(), diags, None)
             .await;
-
-        // Refresh inlay hints
-        if let Err(e) = client_clone.inlay_hint_refresh().await {
-            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
-        }
     });
 
     Ok(task)
@@ -235,27 +282,51 @@ pub async fn handle_document_change(
                 .collect()
         };
 
+        // Mark as loading and start progress
+        if let Some(mut doc) = state_clone.documents.get_mut(&uri_clone) {
+            doc.set_loading();
+        }
+
+        let progress =
+            RegistryProgress::start(client_clone.clone(), uri_clone.as_str(), dep_names.len())
+                .await
+                .ok(); // Ignore errors if client doesn't support progress
+
         // Fetch latest versions from registry in parallel (for update hints)
         let registry = ecosystem_clone.registry();
-        let cached_versions = fetch_latest_versions_parallel(registry, dep_names).await;
+        let cached_versions =
+            fetch_latest_versions_parallel(registry, dep_names, progress.as_ref()).await;
+
+        let success = !cached_versions.is_empty();
 
         // Update document state with cached versions (latest from registry)
         if let Some(mut doc) = state_clone.documents.get_mut(&uri_clone) {
             doc.update_cached_versions(cached_versions);
+            if success {
+                doc.set_loaded();
+            } else {
+                doc.set_failed();
+            }
         }
 
-        // Publish diagnostics (using internal version to avoid recursive cold start)
+        // End progress
+        if let Some(progress) = progress {
+            progress.end(success).await;
+        }
+
+        // Refresh inlay hints IMMEDIATELY after loading completes
+        // (before diagnostics which may take longer due to additional network calls)
+        if let Err(e) = client_clone.inlay_hint_refresh().await {
+            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
+        }
+
+        // Publish diagnostics (may be slower, runs after hints are already visible)
         let diags =
             diagnostics::generate_diagnostics_internal(Arc::clone(&state_clone), &uri_clone).await;
 
         client_clone
             .publish_diagnostics(uri_clone.clone(), diags, None)
             .await;
-
-        // Refresh inlay hints
-        if let Err(e) = client_clone.inlay_hint_refresh().await {
-            tracing::debug!("inlay_hint_refresh not supported: {:?}", e);
-        }
     });
 
     Ok(task)

